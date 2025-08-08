@@ -53,6 +53,7 @@ class poortorch:
 
                 # Strides
                 self.stride = [None for _ in range(len(self.shape))]
+                self.stride[-1] = 1
                 for i in reversed(range(len(self.shape) - 1)):
                     self.stride[i] = self.shape[i + 1] * self.stride[i + 1]
                 
@@ -194,7 +195,7 @@ class poortorch:
                     shape = []
                     ds = []
                     for k_item in xl: # Changed from iterating by index to iterating by item
-                        ds.append(poortorch.tensor.helper._shape_iterable(k_item, self))
+                        ds.append(poortorch.tensor.helper._shape_iterable(self, k_item))
 
                     same_shape = all(ds[0] == j for j in ds)
                     if not same_shape:
