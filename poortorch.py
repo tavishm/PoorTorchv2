@@ -117,7 +117,51 @@ class poortorch:
             if len(self.shape) != 0:
                 raise Exception("Cannot convert non-scalar tensor with shape to float 😔")
             else:
-                return float(self.__storage__)            
+                return float(self.__storage__)
+        
+        def __getitem__(self, idx) -> 'poortorch.tensor':
+            
+            shape= self.shape
+            dat= self.__storage__
+            if isinstance(idx, slice):
+                idx=(idx,)
+            
+            #exception handling
+            if len(idx)>len(shape):
+                raise Exception('Number of parameters exceeded order of tensor 😔')
+            for i in idx:
+                if not (isinstance(i.start,(int, type(None))) and isinstance(i.stop,(int, type(None))) and isinstance(i.step,(int, type(None)))) :
+                    raise Exception("indices must be integers 😔")
+            for i in zip(idx, shape[:len(idx)]):
+                if not ((i[0].start==None or 0<=i[0].start<=i[1]) and (i[0].start==None or 0<=i[0].stop<=i[1]) and (i[0].start==None or 0<=i[0].step<=i[1])):
+                    raise Exception('index out of range 😔')
+            
+            #converting tuple of slice objects into a nested list and replacing 'None's 
+            idxl=[]
+            for i in range(len(shape)):
+                idxl.append([0,shape[i],1])
+            for i in range(len(idx)):
+                if idx[i].start!=None:
+                    idxl[i][0]= idx[i].start
+
+                if idx[i].stop!=None:
+                    idxl[i][1]=idx[i].stop
+                
+                if idx[i].step==None:
+                    idxl[i][2]=1
+                else: 
+                    idxl[i][2]=idx[i].step  
+            
+            l=[]
+            def get(dat,shape,idxl):
+                if len(idxl)==1:
+                    l.append(dat[slice(*idxl[0])])
+                else:
+                    for i in range(idxl[0][0],idxl[0][1],idxl[0][2]):
+                        get(dat[i*math.prod(shape[1:]):(i+1)*math.prod(shape[1:])], shape[1:],idxl[1:])
+                    
+            get(dat, shape, idxl)
+            return poortorch.tensor(l[0])
 
         
         class helper:
@@ -150,7 +194,7 @@ class poortorch:
                     shape = []
                     ds = []
                     for k_item in xl: # Changed from iterating by index to iterating by item
-                        ds.append(poortorch.tensor._shape_iterable(k_item, self))
+                        ds.append(poortorch.tensor.helper._shape_iterable(k_item, self))
 
                     same_shape = all(ds[0] == j for j in ds)
                     if not same_shape:
