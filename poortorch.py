@@ -124,14 +124,22 @@ class poortorch:
             
             shape= self.shape
             dat= self.__storage__
-
+            stride= self.stride
+    
             #formatting the idx variable
             if isinstance(idx, slice):
                 idx=[idx,]
+            #single element case
+            if all(isinstance(i,int) for i in idx) and len(idx)==len(shape):
+                loc=0
+                for i in zip(idx,stride):
+                    loc+=i[0]*i[1]
+                return poortorch.tensor(dat[loc])
+                
             idx=list(idx)
             for i in range(len(idx)):
                 if isinstance(idx[i], int):
-                    idx[i]=slice(i,i+1,1)
+                    idx[i]=slice(idx[i],idx[i]+1,1)
 
             #exception handling
             if len(idx)>len(shape):
@@ -229,7 +237,3 @@ class poortorch:
 a= poortorch.tensor([[[1,2,3,4,5],[6,7,8,9,10]],[[11,12,13,14,15],[16,17,18,19,20]]])
 b= poortorch.tensor([[1,2,3,4,5],[6,7,8,9,0]])
 c= poortorch.tensor([1,2,3,4,5])
-
-print(a[:,:,2])
-print(b[:,:1])
-print(c[1:4])
