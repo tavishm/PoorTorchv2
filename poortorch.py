@@ -39,12 +39,18 @@ class poortorch:
         return poortorch.tensor(data, dtype=dtype)
 
     class tensor:
-        def __init__(self, xl: Union[list, float, int], dtype: "poortorch.dtype" = None, manual_creation_dict: dict = None):
+        def __init__(self, xl: Union[list, float, int], dtype: "poortorch.dtype" = None, requires_grad: bool = False, _children: tuple = (), _op: str = '', manual_creation_dict: dict = None):
+            self.grad = None
+            self._backward = lambda: None
+            self._prev = set(_children)
+            self._op = _op
+            self.requires_grad = requires_grad
+
             if isinstance(xl, (int, float)): # Scalars
-                self.shape = []
+                self.shape = ()
                 self.stride = []
                 self.dtype = dtype if dtype else (poortorch.float32 if isinstance(xl, float) else poortorch.int64)
-                self.__storage__ = self.dtype(xl)
+                self.__storage__ = [self.dtype(xl)]
             elif isinstance(xl, list): 
                 if manual_creation_dict: 
                     # If a tensor is created outside of the list to tensor implementation, only a flat list, shape and dtype are required. 
@@ -67,19 +73,54 @@ class poortorch:
                         self.shape = tuple(poortorch.tensor.helper._shape_iterable(self, xl)[::-1]) # Throws error if float is encountered in int dtypes. It's okay to encounter ints in float dtypes.
 
                 # Strides
-                self.stride = [None for _ in range(len(self.shape))]
-                self.stride[-1] = 1
-                for i in reversed(range(len(self.shape) - 1)):
-                    self.stride[i] = self.shape[i + 1] * self.stride[i + 1]
+                if len(self.shape) > 0:
+                    self.stride = [None for _ in range(len(self.shape))]
+                    self.stride[-1] = 1
+                    for i in reversed(range(len(self.shape) - 1)):
+                        self.stride[i] = self.shape[i + 1] * self.stride[i + 1]
+                else:
+                    self.stride = []
                 
                 # Converting data to decided dtype
-                for i in range(len(self.__storage__)): self.__storage__[i] == poortorch.tensor(self.__storage__[i], dtype=self.dtype)
+                # Check if elements are already correct type if possible to avoid redundant work, but for "inefficient" we re-cast
+                if not manual_creation_dict:
+                     for i in range(len(self.__storage__)): self.__storage__[i] = self.dtype(self.__storage__[i])
             else:
                 raise Exception("Tensor can only be created from int, float or lists 😔")
+
+        def backward(self):
+            topo = []
+            visited = set()
+            def build_topo(v):
+                if v not in visited:
+                    visited.add(v)
+                    for child in v._prev:
+                        build_topo(child)
+                    topo.append(v)
+            build_topo(self)
+
+            self.grad = poortorch.ones(self.shape, dtype=self.dtype) # Implicitly gradient of self wrt self is 1s
+            
+            for node in reversed(topo):
+                node._backward()
+
+        def zero_grad(self):
+            self.grad = None
+
+        def astype(self, dtype: "poortorch.dtype") -> "poortorch.tensor":
+             manual_dict = {
+                "__storage__": [dtype(x) for x in self.__storage__],
+                "dtype": dtype,
+                "shape": self.shape
+            }
+             return poortorch.tensor([], None, manual_creation_dict=manual_dict, requires_grad=self.requires_grad)
+
+        def to(self, dtype: "poortorch.dtype") -> "poortorch.tensor":
+             return self.astype(dtype) # Alias for pytorch users
             
         def __str__(self) -> str:
             if len(self.shape) == 0:
-                return f"poortorch.tensor({self.__storage__}, dtype={self.dtype.__name__})"
+                return f"poortorch.tensor({self.__storage__[0]}, dtype={self.dtype.__name__})"
             
             def format_tensor(data, shape, offset=0, depth=0):
                 if depth == len(shape) - 1:
@@ -127,13 +168,13 @@ class poortorch:
             if len(self.shape) != 0:
                 raise Exception("Cannot convert non-scalar tensor with shape to int 😔")
             else:
-                return int(self.__storage__)
+                return int(self.__storage__[0])
         
         def __float__(self) -> float:
             if len(self.shape) != 0:
                 raise Exception("Cannot convert non-scalar tensor with shape to float 😔")
             else:
-                return float(self.__storage__)
+                return float(self.__storage__[0])
         
         def __getitem__(self, idx) -> 'poortorch.tensor':
             
@@ -191,44 +232,204 @@ class poortorch:
             }
             return poortorch.tensor([], None, manual_creation_dict=manual_dict)
 
+        def _accumulate_grad(self, grad):
+            if not self.requires_grad: return
+            if self.grad is None:
+                 self.grad = poortorch.zeros(self.shape, dtype=self.dtype)
+            
+            # Simple accumulation, assume grad matches shape (checked in ops)
+            # Naive loop for accumulation to match style if we wanted, but let's assume
+            # we can use the __add__ of tensors properly, but grad += grad is an inplace op?
+            # poortorch tensors are creating new tensors on add. 
+            # So: self.grad = self.grad + grad
+            if isinstance(self.grad, poortorch.tensor):
+                 self.grad = self.grad + grad
+            else:
+                 # Should not happen if initialized correctly
+                 self.grad = grad
+
         def __add__(self, other) -> 'poortorch.tensor':
-            return self._elementwise_op(other, lambda a, b: a + b)
-
-        def __sub__(self, other) -> 'poortorch.tensor':
-            return self._elementwise_op(other, lambda a, b: a - b)
+            other = other if isinstance(other, poortorch.tensor) else poortorch.tensor(other, dtype=self.dtype)
             
-        def __mul__(self, other) -> 'poortorch.tensor':
-            return self._elementwise_op(other, lambda a, b: a * b)
-            
-        def __truediv__(self, other) -> 'poortorch.tensor':
-            return self._elementwise_op(other, lambda a, b: a / b)
-
-        def _elementwise_op(self, other, op) -> 'poortorch.tensor':
-            if not isinstance(other, poortorch.tensor):
-                # Simple scalar broadcasting support for efficiency/sanity
-                if isinstance(other, (int, float)):
-                    new_storage = [op(x, other) for x in self.__storage__]
-                    manual_dict = {
-                        "__storage__": new_storage,
-                        "dtype": self.dtype,
-                        "shape": self.shape
-                    }
-                    return poortorch.tensor([], None, manual_creation_dict=manual_dict)
-                raise Exception("Operands must be poortorch tensors or scalars 😔")
-                
             if self.shape != other.shape:
                 raise Exception(f"Shape mismatch: {self.shape} and {other.shape} 😔")
-                
+
+            # Forward pass
             new_storage = []
             for i in range(len(self.__storage__)):
-                new_storage.append(op(self.__storage__[i], other.__storage__[i]))
+                new_storage.append(self.__storage__[i] + other.__storage__[i])
+            
+            manual_dict = {
+                "__storage__": new_storage,
+                "dtype": self.dtype,
+                "shape": self.shape
+            }
+            out = poortorch.tensor([], None, manual_creation_dict=manual_dict, 
+                                   requires_grad=self.requires_grad or other.requires_grad,
+                                   _children=(self, other), _op='+')
+            
+            def _backward():
+                self._accumulate_grad(out.grad)
+                other._accumulate_grad(out.grad)
+            out._backward = _backward
+            
+            return out
+
+        def __sub__(self, other) -> 'poortorch.tensor':
+            other = other if isinstance(other, poortorch.tensor) else poortorch.tensor(other, dtype=self.dtype)
+            
+            if self.shape != other.shape:
+                raise Exception(f"Shape mismatch: {self.shape} and {other.shape} 😔")
+
+            # Forward pass
+            new_storage = []
+            for i in range(len(self.__storage__)):
+                new_storage.append(self.__storage__[i] - other.__storage__[i])
+            
+            manual_dict = {
+                "__storage__": new_storage,
+                "dtype": self.dtype,
+                "shape": self.shape
+            }
+            out = poortorch.tensor([], None, manual_creation_dict=manual_dict,
+                                   requires_grad=self.requires_grad or other.requires_grad,
+                                   _children=(self, other), _op='-')
+
+            def _backward():
+                self._accumulate_grad(out.grad)
+                # other.grad += -out.grad -> other.grad += out.grad * -1
+                other._accumulate_grad(out.grad * -1)
+            out._backward = _backward
+            
+            return out
+            
+        def __mul__(self, other) -> 'poortorch.tensor':
+            other = other if isinstance(other, poortorch.tensor) else poortorch.tensor(other, dtype=self.dtype)
+            
+            if self.shape != other.shape:
+                raise Exception(f"Shape mismatch: {self.shape} and {other.shape} 😔")
+
+            # Forward pass
+            new_storage = []
+            for i in range(len(self.__storage__)):
+                new_storage.append(self.__storage__[i] * other.__storage__[i])
                 
             manual_dict = {
                 "__storage__": new_storage,
                 "dtype": self.dtype,
                 "shape": self.shape
             }
-            return poortorch.tensor([], None, manual_creation_dict=manual_dict)
+            out = poortorch.tensor([], None, manual_creation_dict=manual_dict,
+                                   requires_grad=self.requires_grad or other.requires_grad,
+                                   _children=(self, other), _op='*')
+
+            def _backward():
+                # self.grad += other * out.grad
+                self._accumulate_grad(other * out.grad)
+                # other.grad += self * out.grad
+                other._accumulate_grad(self * out.grad)
+            out._backward = _backward
+            
+            return out
+            
+        def __truediv__(self, other) -> 'poortorch.tensor':
+            other = other if isinstance(other, poortorch.tensor) else poortorch.tensor(other, dtype=self.dtype)
+
+            if self.shape != other.shape:
+                raise Exception(f"Shape mismatch: {self.shape} and {other.shape} 😔")
+
+            # Forward pass
+            new_storage = []
+            for i in range(len(self.__storage__)):
+                 new_storage.append(self.__storage__[i] / other.__storage__[i])
+
+            manual_dict = {
+                "__storage__": new_storage,
+                "dtype": self.dtype,
+                "shape": self.shape
+            }
+            out = poortorch.tensor([], None, manual_creation_dict=manual_dict,
+                                   requires_grad=self.requires_grad or other.requires_grad,
+                                   _children=(self, other), _op='/')
+            
+            def _backward():
+                # self.grad += out.grad * (1 / other)
+                self._accumulate_grad(out.grad * (other.pow(-1)))
+                # other.grad += -self * out.grad / other**2
+                #            = out.grad * (-self * other**-2)
+                other._accumulate_grad(out.grad * (self * -1 * other.pow(-2)))
+            out._backward = _backward
+
+            return out
+
+        def pow(self, exponent) -> 'poortorch.tensor':
+            # Needed for division backward pass
+            new_storage = [x ** exponent for x in self.__storage__]
+            manual_dict = {
+                "__storage__": new_storage,
+                "dtype": self.dtype,
+                "shape": self.shape
+            }
+            out = poortorch.tensor([], None, manual_creation_dict=manual_dict,
+                                  requires_grad=self.requires_grad,
+                                  _children=(self,), _op=f'**{exponent}')
+            
+            def _backward():
+                # d/dx (x^n) = n * x^(n-1)
+                # self.grad += out.grad * n * self**(n-1)
+                self._accumulate_grad(out.grad * (self.pow(exponent - 1) * exponent))
+            out._backward = _backward
+            return out
+
+        def reshape(self, new_shape: tuple[int]) -> 'poortorch.tensor':
+            if math.prod(new_shape) != math.prod(self.shape):
+                raise Exception(f"Cannot reshape tensor of size {math.prod(self.shape)} to {new_shape} 😔")
+            
+            # Create manual creation dict to reuse storage
+            manual_dict = {
+                "__storage__": list(self.__storage__), # Copy storage
+                "dtype": self.dtype,
+                "shape": new_shape
+            }
+            out = poortorch.tensor([], None, manual_creation_dict=manual_dict, requires_grad=self.requires_grad, _children=(self,), _op='reshape')
+            
+            def _backward():
+                self._accumulate_grad(out.grad.reshape(self.shape))
+            out._backward = _backward
+            
+            return out
+
+        @property
+        def T(self):
+            return self.transpose()
+
+        def transpose(self) -> 'poortorch.tensor':
+            # Only 2D transpose for now
+            if len(self.shape) != 2: raise Exception("Transpose only supported for 2D tensors 😔")
+            
+            rows, cols = self.shape
+            new_shape = (cols, rows)
+            new_storage = [0] * (rows * cols)
+            
+            for i in range(rows):
+                for j in range(cols):
+                     # self[i, j] -> new[j, i]
+                     # self flat: i * cols + j
+                     # new flat: j * rows + i
+                     new_storage[j * rows + i] = self.__storage__[i * cols + j]
+            
+            manual_dict = {
+                "__storage__": new_storage,
+                "dtype": self.dtype,
+                "shape": new_shape
+            }
+            out = poortorch.tensor([], None, manual_creation_dict=manual_dict, requires_grad=self.requires_grad, _children=(self,), _op='T')
+            
+            def _backward():
+                self._accumulate_grad(out.grad.transpose())
+            out._backward = _backward
+
+            return out
 
         def __matmul__(self, other) -> 'poortorch.tensor':
             if not isinstance(other, poortorch.tensor):
@@ -266,7 +467,19 @@ class poortorch:
                 "dtype": self.dtype, # Propagate dtype? or promote? keeping simple
                 "shape": (rows_a, cols_b)
             }
-            return poortorch.tensor([], None, manual_creation_dict=manual_dict)
+            out = poortorch.tensor([], None, manual_creation_dict=manual_dict,
+                                   requires_grad=self.requires_grad or other.requires_grad,
+                                   _children=(self, other), _op='@')
+            
+            def _backward():
+                # C = A @ B
+                # dA = dC @ B.T
+                self._accumulate_grad(out.grad @ other.T)
+                # dB = A.T @ dC
+                other._accumulate_grad(self.T @ out.grad)
+            out._backward = _backward
+
+            return out
 
         
         class helper:
@@ -322,4 +535,4 @@ class poortorch:
                     "shape": shape,
                 }
 
-                return poortorch.tensor([], None, manual_creation_dict)
+                return poortorch.tensor([], None, manual_creation_dict=manual_creation_dict)
