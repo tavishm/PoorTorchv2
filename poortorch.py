@@ -23,6 +23,21 @@ class poortorch:
     def zeros(shape: tuple[int], dtype: "poortorch.dtype" = None) -> "poortorch.tensor":
         return poortorch.tensor.helper._create_per_value_independent_tensor(shape, lambda: 0, dtype)
 
+    def ones(shape: tuple[int], dtype: "poortorch.dtype" = None) -> "poortorch.tensor":
+        return poortorch.tensor.helper._create_per_value_independent_tensor(shape, lambda: 1, dtype)
+    
+    def randn(shape: tuple[int], dtype: "poortorch.dtype" = None) -> "poortorch.tensor":
+        import random
+        return poortorch.tensor.helper._create_per_value_independent_tensor(shape, lambda: random.gauss(0, 1), dtype)
+
+    def arange(start: int, end: int = None, step: int = 1, dtype: "poortorch.dtype" = None) -> "poortorch.tensor":
+        if end is None:
+            end = start
+            start = 0
+            
+        data = list(range(start, end, step))
+        return poortorch.tensor(data, dtype=dtype)
+
     class tensor:
         def __init__(self, xl: Union[list, float, int], dtype: "poortorch.dtype" = None, manual_creation_dict: dict = None):
             if isinstance(xl, (int, float)): # Scalars
@@ -164,6 +179,95 @@ class poortorch:
             get(dat, shape, idxl)
             return poortorch.tensor(l[0])
 
+        def reshape(self, new_shape: tuple[int]) -> 'poortorch.tensor':
+            if math.prod(new_shape) != math.prod(self.shape):
+                raise Exception(f"Cannot reshape tensor of size {math.prod(self.shape)} to {new_shape} 😔")
+            
+            # Create manual creation dict to reuse storage
+            manual_dict = {
+                "__storage__": list(self.__storage__), # Copy storage
+                "dtype": self.dtype,
+                "shape": new_shape
+            }
+            return poortorch.tensor([], None, manual_creation_dict=manual_dict)
+
+        def __add__(self, other) -> 'poortorch.tensor':
+            return self._elementwise_op(other, lambda a, b: a + b)
+
+        def __sub__(self, other) -> 'poortorch.tensor':
+            return self._elementwise_op(other, lambda a, b: a - b)
+            
+        def __mul__(self, other) -> 'poortorch.tensor':
+            return self._elementwise_op(other, lambda a, b: a * b)
+            
+        def __truediv__(self, other) -> 'poortorch.tensor':
+            return self._elementwise_op(other, lambda a, b: a / b)
+
+        def _elementwise_op(self, other, op) -> 'poortorch.tensor':
+            if not isinstance(other, poortorch.tensor):
+                # Simple scalar broadcasting support for efficiency/sanity
+                if isinstance(other, (int, float)):
+                    new_storage = [op(x, other) for x in self.__storage__]
+                    manual_dict = {
+                        "__storage__": new_storage,
+                        "dtype": self.dtype,
+                        "shape": self.shape
+                    }
+                    return poortorch.tensor([], None, manual_creation_dict=manual_dict)
+                raise Exception("Operands must be poortorch tensors or scalars 😔")
+                
+            if self.shape != other.shape:
+                raise Exception(f"Shape mismatch: {self.shape} and {other.shape} 😔")
+                
+            new_storage = []
+            for i in range(len(self.__storage__)):
+                new_storage.append(op(self.__storage__[i], other.__storage__[i]))
+                
+            manual_dict = {
+                "__storage__": new_storage,
+                "dtype": self.dtype,
+                "shape": self.shape
+            }
+            return poortorch.tensor([], None, manual_creation_dict=manual_dict)
+
+        def __matmul__(self, other) -> 'poortorch.tensor':
+            if not isinstance(other, poortorch.tensor):
+                raise Exception("Matmul only supports poortorch tensors 😔")
+            
+            # Only implementing 2D matmul for now as per "inefficient" spec, maybe simple batching if needed
+            if len(self.shape) != 2 or len(other.shape) != 2:
+                raise Exception("Matmul only supports 2D tensors for now 😔")
+                
+            if self.shape[1] != other.shape[0]:
+                raise Exception(f"Shape mismatch for matmul: {self.shape} and {other.shape} 😔")
+                
+            rows_a = self.shape[0]
+            cols_a = self.shape[1] # same as rows_b
+            cols_b = other.shape[1]
+            
+            result_storage = [0] * (rows_a * cols_b)
+            
+            # Naive O(N^3) implementation
+            for i in range(rows_a):
+                for j in range(cols_b):
+                    sum_val = 0
+                    for k in range(cols_a):
+                        # Calculate flat indices
+                        idx_a = i * self.stride[0] + k * self.stride[1]
+                        idx_b = k * other.stride[0] + j * other.stride[1]
+                        sum_val += self.__storage__[idx_a] * other.__storage__[idx_b]
+                    
+                    # Result is row-major
+                    result_idx = i * cols_b + j
+                    result_storage[result_idx] = sum_val
+                    
+            manual_dict = {
+                "__storage__": result_storage,
+                "dtype": self.dtype, # Propagate dtype? or promote? keeping simple
+                "shape": (rows_a, cols_b)
+            }
+            return poortorch.tensor([], None, manual_creation_dict=manual_dict)
+
         
         class helper:
             def _flatten_list(self, xl: list) -> list:
@@ -207,7 +311,7 @@ class poortorch:
                 return shape
             
             def _create_per_value_independent_tensor(shape: tuple[int], value_function: Callable, dtype: "poortorch.dtype") -> "poortorch.tensor":
-                if all(isinstance(dim, int) and dim > 0 for dim in shape): raise Exception("Shape must be a tuple of positive integers 😔")
+                if not all(isinstance(dim, int) and dim > 0 for dim in shape): raise Exception("Shape must be a tuple of positive integers 😔")
                 __storage__ = [value_function() for _ in range(math.prod(shape))]
                 if not dtype:
                     dtype = poortorch.float32 if isinstance(__storage__[0], float) else poortorch.int64
